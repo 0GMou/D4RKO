@@ -1,111 +1,110 @@
-name: Build MPV (d4rk0)
+name: build-mpv (Windows x64)
 
 on:
-  workflow_dispatch: {}  # lo ejecutas a mano cuando quieras
+  workflow_dispatch: {}
+  # (Opcional) Compila semanal para detectar nuevas versiones
+  schedule:
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      MSYSTEM: CLANG64
+      CHERE_INVOKING: 1
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1) Resolver automáticamente el ÚLTIMO release estable de MPV en GitHub
-      - name: Resolve latest stable MPV release tag
-        id: resolve_mpv
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # gh CLI usa este token en runners hospedados por GitHub
-        run: |
-          $ErrorActionPreference = "Stop"
-          try {
-            # Sin tag explícito, 'gh release view' devuelve el último release estable
-            $tag = gh release view --repo mpv-player/mpv --json tagName --jq '.tagName'
-          } catch {
-            Write-Warning "Fallo gh/CLI. Intentando via REST API..."
-            $resp = Invoke-RestMethod -Uri "https://api.github.com/repos/mpv-player/mpv/releases/latest" -Headers @{ "User-Agent"="d4rk0-ci" }
-            $tag = $resp.tag_name
-          }
-          if (-not $tag) { throw "No pude resolver el tag de MPV." }
-          "mpv_tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          Write-Host "MPV tag resuelto: $tag"
-
-      # 2) Preparar MSYS2 con CLANG64 y paquetes necesarios
-      - name: Setup MSYS2 (CLANG64) + packages
+      - name: Instala MSYS2 + toolchain + deps
         uses: msys2/setup-msys2@v2
         with:
           msystem: clang64
-          update: true
+          release: false
           install: >-
+            base-devel
             git
             zip
+            jq
+            curl
+            # Herramientas de compilación
             mingw-w64-clang-x86_64-toolchain
             mingw-w64-clang-x86_64-meson
             mingw-w64-clang-x86_64-ninja
-            mingw-w64-clang-x86_64-pkgconf
+            mingw-w64-clang-x86_64-python
+            # Dependencias mpv
             mingw-w64-clang-x86_64-ffmpeg
-            mingw-w64-clang-x86_64-libass
             mingw-w64-clang-x86_64-libplacebo
-            mingw-w64-clang-x86_64-vulkan-headers
-            mingw-w64-clang-x86_64-vulkan-loader
-            mingw-w64-clang-x86_64-spirv-cross
-            mingw-w64-clang-x86_64-shaderc
+            mingw-w64-clang-x86_64-libass
+            mingw-w64-clang-x86_64-harfbuzz
+            mingw-w64-clang-x86_64-uchardet
+            # Para detectar DLLs y crear bundle portable
             mingw-w64-clang-x86_64-ntldd
 
-      # 3) Compilar mpv y montar ZIP portable (x64)
-      - name: Build mpv (Meson/Ninja) + make portable ZIP
-        shell: msys2 {0}
-        env:
-          MPV_TAG: ${{ steps.resolve_mpv.outputs.mpv_tag }}
+      - name: Detecta la última release estable de mpv
+        shell: bash
         run: |
-          set -euxo pipefail
-          test -n "$MPV_TAG"
+          set -e
+          TAG=$(curl -fsSL https://api.github.com/repos/mpv-player/mpv/releases/latest | jq -r .tag_name)
+          echo "MPV_TAG=$TAG" >> $GITHUB_ENV
+          echo "MPV_VER=${TAG#v}" >> $GITHUB_ENV
+          echo "Última estable de mpv: $TAG"
 
-          # Obtener fuente del tag estable
-          git clone --depth 1 --branch "$MPV_TAG" https://github.com/mpv-player/mpv.git
-          cd mpv
+      - name: Descarga el código fuente de mpv
+        shell: bash
+        run: |
+          curl -fsSL -o mpv.tar.gz "https://github.com/mpv-player/mpv/archive/refs/tags/${MPV_TAG}.tar.gz"
+          tar -xzf mpv.tar.gz
+          mv "mpv-${MPV_VER}" mpv-src
 
-          # Configurar + compilar + "instalar" en staging
-          meson setup build --prefix=/clang64
+      - name: Parchea macros FF_PROFILE_* → AV_PROFILE_*
+        shell: bash
+        working-directory: mpv-src
+        run: |
+          set -e
+          sed -i 's/FF_PROFILE_ARIB_PROFILE_A/AV_PROFILE_ARIB_PROFILE_A/g' demux/demux_mkv.c
+          sed -i 's/FF_PROFILE_ARIB_PROFILE_C/AV_PROFILE_ARIB_PROFILE_C/g' demux/demux_mkv.c
+          sed -i 's/FF_PROFILE_UNKNOWN/AV_PROFILE_UNKNOWN/g' demux/demux_mkv.c
+
+      - name: Configura (Meson)
+        shell: msys2 {0}
+        working-directory: mpv-src
+        run: |
+          meson setup build --buildtype=release
+
+      - name: Compila
+        shell: msys2 {0}
+        working-directory: mpv-src
+        run: |
           meson compile -C build
-          meson install -C build --destdir "$PWD/stage"
 
-          # Reunir binario(s)
-          mkdir -p "$GITHUB_WORKSPACE/out/mpv"
-          cp -f "stage/clang64/bin/mpv.exe" "$GITHUB_WORKSPACE/out/mpv/" || (echo "mpv.exe no encontrado" && exit 1)
-          if [ -f "stage/clang64/bin/mpv.com" ]; then cp -f "stage/clang64/bin/mpv.com" "$GITHUB_WORKSPACE/out/mpv/"; fi
+      - name: Empaqueta bundle portable con DLLs
+        shell: msys2 {0}
+        working-directory: mpv-src
+        run: |
+          set -e
+          mkdir -p ../dist
+          cp -v build/mpv.exe ../dist/
+          cp -v build/mpv.com ../dist/ || true
+          # Copia dependencias runtime detectadas por ntldd
+          ntldd -R build/mpv.exe | awk '/=>/ && $3 ~ /\\.(dll|DLL)$/ {print $3}' | sort -u | xargs -I{} cp -uv {} ../dist/ || true
+          cd ../dist
+          /usr/bin/zip -9 -r "d4rk0.mpv-${MPV_VER}-windows-x64.zip" .
 
-          # Copiar DLLs requeridas junto al exe (hacerlo portable)
-          cd "$GITHUB_WORKSPACE/out/mpv"
-          # ntldd salida típica: nombre.dll => /clang64/bin/nombre.dll (0x....)
-          ntldd -R ./mpv.exe | awk '/=>/ {print $3}' | grep -E '^/clang64/bin/.*\.dll$' | while read -r dll; do cp -n "$dll" .; done
-
-          # Empaquetar ZIP con el nombre acordado
-          ver="${MPV_TAG#v}"
-          cd "$GITHUB_WORKSPACE/out/mpv"
-          zip -r "../d4rk0.mpv-${ver}-windows-x64.zip" .
-
-      # 4) (Opcional) Subir el ZIP como artefacto del job
-      - name: Upload artifact
+      - name: Sube artifact
         uses: actions/upload-artifact@v4
         with:
-          name: d4rk0.mpv-zip
-          path: out/d4rk0.mpv-*-windows-x64.zip
+          name: d4rk0.mpv-${{ env.MPV_VER }}-windows-x64
+          path: dist/d4rk0.mpv-${{ env.MPV_VER }}-windows-x64.zip
 
-      # 5) Publicar en GitHub Releases del repo 0GMou/D4RKO
-      - name: Publish to GitHub Releases
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $tag = "${{ steps.resolve_mpv.outputs.mpv_tag }}"
-          $ver = $tag.TrimStart('v')
-          $zip = Get-ChildItem -Path "$env:GITHUB_WORKSPACE/out" -Filter "d4rk0.mpv-$ver-windows-x64.zip" | Select-Object -First 1
-          if (-not $zip) { throw "ZIP no encontrado" }
-
-          if (-not (gh release view "mpv-$ver" 2>$null)) {
-            gh release create "mpv-$ver" "$($zip.FullName)" --title "MPV $ver (d4rk0 build)" --notes "Build automática desde tag $tag" --latest --verify-tag=false
-          } else {
-            gh release upload "mpv-$ver" "$($zip.FullName)" --clobber
-          }
+      - name: (Opcional) Crea release en GitHub con el zip
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: mpv-${{ env.MPV_TAG }}
+          name: "d4rk0.mpv ${{ env.MPV_VER }} (Windows x64)"
+          files: dist/d4rk0.mpv-${{ env.MPV_VER }}-windows-x64.zip
