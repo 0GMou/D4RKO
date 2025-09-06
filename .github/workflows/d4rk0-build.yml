@@ -67,20 +67,22 @@ jobs:
           $headers = @{ "Authorization"="Bearer $env:GITHUB_TOKEN"; "Accept"="application/vnd.github+json" }
           try {
             $resp = Invoke-RestMethod -Method GET -Uri $url -Headers $headers -ErrorAction Stop
-            $need = @(
-              "d4rk0.mpv-$env:MPV_VER-windows-x64.zip",
-              "FEATURES.txt",
-              "SHA256SUMS.txt"
-            )
-            $assetNames = @($resp.assets | ForEach-Object { $_.name })
-            $missing = @($need | Where-Object { $assetNames -notcontains $_ })
-            if ($missing.Count -eq 0) {
-              "skip=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-              "release_url=$($resp.html_url)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-              Write-Host "Release + assets ya existen: $($resp.html_url)"
+            $zipName = "d4rk0.mpv-$env:MPV_VER-windows-x64.zip"
+            $zipAsset = $resp.assets | Where-Object { $_.name -eq $zipName } | Select-Object -First 1
+            $shaAsset = $resp.assets | Where-Object { $_.name -eq "SHA256SUMS.txt" } | Select-Object -First 1
+            if ($zipAsset -and $shaAsset) {
+              $shaTxt = Invoke-RestMethod -Method GET -Uri $shaAsset.browser_download_url -Headers @{ "Authorization"="Bearer $env:GITHUB_TOKEN" }
+              if ($shaTxt -match "(?m)^[0-9a-f]{64}\s+${zipName}$") {
+                "skip=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+                "release_url=$($resp.html_url)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+                Write-Host "Release verificada (ZIP+SHA): $($resp.html_url)"
+              } else {
+                "skip=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+                Write-Host "SHA256SUMS.txt no contiene entrada para $zipName; continuamos."
+              }
             } else {
-              Write-Host "Faltan assets en la release: $($missing -join ', ') — seguimos con el build."
               "skip=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+              Write-Host "Falta ZIP o SHA256SUMS.txt en la release; continuamos."
             }
           } catch {
             "skip=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
@@ -278,10 +280,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: d4rk0.mpv-${{ env.MPV_VER }}-windows-x64
-          path: |
-            ${{ env.ZIP_PATH_WIN }}
-            ${{ env.FEATURES_PATH_WIN }}
-            ${{ env.SHA256_PATH_WIN }}
+          path: ${{ env.ZIP_PATH_WIN }}
           if-no-files-found: error
           retention-days: 30
 
@@ -295,21 +294,58 @@ jobs:
           $shaPath   = "${{ env.SHA256_PATH_WIN }}"
           $outDir    = Split-Path $zipPath -Parent
           $notesPath = Join-Path $outDir "RELEASE_NOTES.txt"
+
           $sha      = Get-Content -Raw -Path $shaPath
           $features = Get-Content -Raw -Path $featPath
           $ver      = $env:MPV_VER
+
+          function FindVal([string]$key, [string]$text) {
+            if ($text -match "(?m)^\s*$key\s+([A-Za-z]+)\b") { return $Matches[1] } else { return "unknown" }
+          }
+
+          $vals = [ordered]@{
+            "d3d11"      = FindVal "d3d11"      $features
+            "gl"         = FindVal "gl"         $features
+            "vulkan"     = FindVal "vulkan"     $features
+            "lua"        = FindVal "lua"        $features
+            "javascript" = FindVal "javascript" $features
+            "libplacebo" = FindVal "libplacebo" $features
+            "zimg"       = FindVal "zimg"       $features
+            "lcms2"      = FindVal "lcms2"      $features
+            "libbluray"  = FindVal "libbluray"  $features
+            "dvdnav"     = FindVal "dvdnav"     $features
+            "libmpv"     = FindVal "libmpv"     $features
+            "gpl"        = FindVal "gpl"        $features
+          }
+
+          $ffv = ""; $lpv = ""
+          $smoke = Join-Path $outDir "smoke_osc.log"
+          if (Test-Path $smoke) {
+            $log = Get-Content -Raw -Path $smoke
+            if ($log -match "FFmpeg version:\s*([^\r\n]+)")      { $ffv = $Matches[1].Trim() }
+            if ($log -match "libplacebo version:\s*([^\r\n]+)")  { $lpv = $Matches[1].Trim() }
+          }
+
           $lines = @(
             "d4rk0.mpv $ver (Windows x64)"
             ""
-            "SHA256:"
-            $sha
+            "```"
+            ($sha -replace "`r","").TrimEnd()
+            "```"
             ""
-            "Feature summary (Meson):"
-            "------------------------"
-            $features
+            "### Highlights"
+            "- Video outputs: d3d11: $($vals[""d3d11""]), gl: $($vals[""gl""]), vulkan: $($vals[""vulkan""])"
+            "- Scripting: Lua: $($vals[""lua""]), JavaScript (MuJS): $($vals[""javascript""])"
+            "- Quality: libplacebo: $($vals[""libplacebo""]), zimg: $($vals[""zimg""]), lcms2: $($vals[""lcms2""])"
+            "- Discos: libbluray: $($vals[""libbluray""]), dvdnav: $($vals[""dvdnav""])"
+            "- Librería/License: libmpv: $($vals[""libmpv""]), GPL: $($vals[""gpl""])"
           )
-          $text = $lines -join "`r`n"
-          $text | Out-File -FilePath $notesPath -Encoding utf8
+          if ($ffv -or $lpv) {
+            $extra = "Versions: " + ($(if($ffv){"FFmpeg $ffv"}) + $(if($ffv -and $lpv){"; "}) + $(if($lpv){"libplacebo $lpv"}))
+            $lines += $extra
+          }
+
+          ($lines -join "`r`n") | Out-File -FilePath $notesPath -Encoding utf8
           "RELEASE_NOTES_PATH_WIN=$notesPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Publish to GitHub Releases
@@ -322,8 +358,8 @@ jobs:
           name: "MPV ${{ env.MPV_VER }} (d4rk0 build, Windows x64)"
           files: |
             ${{ env.ZIP_PATH_WIN }}
-            ${{ env.FEATURES_PATH_WIN }}
             ${{ env.SHA256_PATH_WIN }}
           body_path: ${{ env.RELEASE_NOTES_PATH_WIN }}
           make_latest: true
           fail_on_unmatched_files: true
+
