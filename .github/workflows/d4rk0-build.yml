@@ -295,13 +295,11 @@ jobs:
           $outDir    = Split-Path $zipPath -Parent
           $notesPath = Join-Path $outDir "RELEASE_NOTES.txt"
 
-          $sha      = Get-Content -Raw -Path $shaPath
+          $sha      = (Get-Content -Raw -Path $shaPath).Trim()
           $features = Get-Content -Raw -Path $featPath
           $ver      = $env:MPV_VER
 
-          function FindVal([string]$key, [string]$text) {
-            if ($text -match "(?m)^\s*$key\s+([A-Za-z]+)\b") { return $Matches[1] } else { return "unknown" }
-          }
+          function FindVal([string]$key, [string]$text) { if ($text -match "(?m)^\s*$key\s+([A-Za-z]+)\b") { $Matches[1] } else { "unknown" } }
 
           $vals = [ordered]@{
             "d3d11"      = FindVal "d3d11"      $features
@@ -322,15 +320,15 @@ jobs:
           $smoke = Join-Path $outDir "smoke_osc.log"
           if (Test-Path $smoke) {
             $log = Get-Content -Raw -Path $smoke
-            if ($log -match "FFmpeg version:\s*([^\r\n]+)")      { $ffv = $Matches[1].Trim() }
-            if ($log -match "libplacebo version:\s*([^\r\n]+)")  { $lpv = $Matches[1].Trim() }
+            if ($log -match "FFmpeg version:\s*([^\r\n]+)")     { $ffv = $Matches[1].Trim() }
+            if ($log -match "libplacebo version:\s*([^\r\n]+)") { $lpv = $Matches[1].Trim() }
           }
 
           $lines = @(
             "d4rk0.mpv $ver (Windows x64)"
             ""
             "```"
-            ($sha -replace "`r","").TrimEnd()
+            $sha
             "```"
             ""
             "### Highlights"
