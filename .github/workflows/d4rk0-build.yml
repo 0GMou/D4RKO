@@ -327,9 +327,9 @@ jobs:
           $lines = @(
             "d4rk0.mpv $ver (Windows x64)"
             ""
-            "```"
+            '```'
             $sha
-            "```"
+            '```'
             ""
             "### Highlights"
             "- Video outputs: d3d11: $($vals[""d3d11""]), gl: $($vals[""gl""]), vulkan: $($vals[""vulkan""])"
