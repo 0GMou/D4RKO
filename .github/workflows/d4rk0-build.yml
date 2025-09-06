@@ -73,7 +73,7 @@ jobs:
               "SHA256SUMS.txt"
             )
             $assetNames = @($resp.assets | ForEach-Object { $_.name })
-            $missing = $need | Where-Object { $assetNames -notcontains $_ }
+            $missing = @($need | Where-Object { $assetNames -notcontains $_ })
             if ($missing.Count -eq 0) {
               "skip=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
               "release_url=$($resp.html_url)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
@@ -85,6 +85,7 @@ jobs:
           } catch {
             "skip=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
             Write-Host "Release no existe; continuamos."
+          }
 
       - name: Skip summary
         if: ${{ steps.skipcheck.outputs.skip == 'true' }}
