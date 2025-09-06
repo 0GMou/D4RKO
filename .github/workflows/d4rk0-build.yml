@@ -20,17 +20,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1) Resolver la ÚLTIMA release estable de MPV (robusto)
+      # 1) Resolver la ÚLTIMA release estable de MPV (mantengo tu lógica)
       - name: Resolve latest stable MPV release
         id: mpvver
         shell: pwsh
         env:
-          GH_TOKEN: ${{ github.token }}       # necesario para gh
-          GITHUB_TOKEN: ${{ github.token }}   # para la API REST
+          GH_TOKEN: ${{ github.token }}       # para gh
+          GITHUB_TOKEN: ${{ github.token }}   # para REST
         run: |
           $ErrorActionPreference = "Stop"
 
-          # 1) Intento con gh (y verificación del exit code)
+          # Intento con gh y verifico exit code
           $tag = ""
           if (Get-Command gh -ErrorAction SilentlyContinue) {
             if (-not $env:GH_TOKEN) { $env:GH_TOKEN = $env:GITHUB_TOKEN }
@@ -38,7 +38,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { $tag = "" }
           }
 
-          # 2) Fallback por REST si hace falta
+          # Fallback por REST si hace falta
           if (-not $tag) {
             $headers = @{
               "User-Agent"            = "d4rk0-ci"
@@ -57,7 +57,7 @@ jobs:
           "MPV_VER=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "MPV tag: $tag / version: $ver"
 
-      # 2) MSYS2 (CLANG64) + toolchain + dependencias
+      # 2) MSYS2 (CLANG64) + toolchain + dependencias (SIN comentarios en 'install')
       - name: Setup MSYS2 (CLANG64) + packages
         uses: msys2/setup-msys2@v2
         with:
@@ -83,7 +83,6 @@ jobs:
             mingw-w64-clang-x86_64-spirv-cross
             mingw-w64-clang-x86_64-shaderc
             mingw-w64-clang-x86_64-ntldd
-            # ADDED: extras para paridad/plus con shinchiro
             mingw-w64-clang-x86_64-luajit
             mingw-w64-clang-x86_64-mujs
             mingw-w64-clang-x86_64-zimg
@@ -110,7 +109,7 @@ jobs:
           set -e
           sed -i 's/FF_PROFILE_/AV_PROFILE_/g' demux/demux_mkv.c || true
 
-      # 5) Configurar + Compilar con Meson/Ninja
+      # 5) Configurar + Compilar con Meson/Ninja (igual que tu base)
       - name: Configure & Build (Meson/Ninja)
         shell: msys2 {0}
         working-directory: mpv-src
@@ -119,7 +118,7 @@ jobs:
           meson setup build --buildtype=release
           meson compile -C build -v
 
-      # 6) Empaquetar portable: mpv.exe + DLLs + scripts/OSC (robusto)
+      # 6) Empaquetar portable: mpv.exe + DLLs + scripts/OSC (bloque robusto)
       - name: Make portable ZIP
         shell: msys2 {0}
         working-directory: mpv-src
@@ -151,7 +150,7 @@ jobs:
             fi
           done
 
-          # ADDED: scripts oficiales y config portable (OSC/UI)
+          # Scripts oficiales + config portable (para igualar/superar shinchiro)
           mkdir -p "$out/portable_config/scripts"
           cp -v "player/lua/osc.lua"         "$out/portable_config/scripts/osc.lua"
           cp -v "player/lua/stats.lua"       "$out/portable_config/scripts/stats.lua"
@@ -168,7 +167,7 @@ jobs:
           cd "$out"
           /usr/bin/zip -9 -r "d4rk0.mpv-${MPV_VER}-windows-x64.zip" .
 
-      # 7) Localizar el ZIP con ruta absoluta de Windows (para las actions)
+      # 7) Localizar el ZIP con ruta absoluta de Windows (como en tu base)
       - name: Locate ZIP (Windows absolute path)
         id: locatezip
         shell: pwsh
@@ -179,7 +178,7 @@ jobs:
           "ZIP_PATH_WIN=$($zip.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "ZIP found at: $($zip.FullName)"
 
-      # 8) Subir artefacto (usa la ruta absoluta)
+      # 8) Subir artefacto (mismo patrón que tu base)
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -187,7 +186,7 @@ jobs:
           path: ${{ env.ZIP_PATH_WIN }}
           if-no-files-found: error
 
-      # 9) Publicar en GitHub Releases (crea/actualiza release mpv-<versión>)
+      # 9) Publicar en GitHub Releases (mismo patrón que tu base)
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
