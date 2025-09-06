@@ -67,22 +67,15 @@ jobs:
           $headers = @{ "Authorization"="Bearer $env:GITHUB_TOKEN"; "Accept"="application/vnd.github+json" }
           try {
             $resp = Invoke-RestMethod -Method GET -Uri $url -Headers $headers -ErrorAction Stop
-            $zipName = "d4rk0.mpv-$env:MPV_VER-windows-x64.zip"
+            $zipName  = "d4rk0.mpv-$env:MPV_VER-windows-x64.zip"
             $zipAsset = $resp.assets | Where-Object { $_.name -eq $zipName } | Select-Object -First 1
-            $shaAsset = $resp.assets | Where-Object { $_.name -eq "SHA256SUMS.txt" } | Select-Object -First 1
-            if ($zipAsset -and $shaAsset) {
-              $shaTxt = Invoke-RestMethod -Method GET -Uri $shaAsset.browser_download_url -Headers @{ "Authorization"="Bearer $env:GITHUB_TOKEN" }
-              if ($shaTxt -match "(?m)^[0-9a-f]{64}\s+${zipName}$") {
-                "skip=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-                "release_url=$($resp.html_url)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-                Write-Host "Release verificada (ZIP+SHA): $($resp.html_url)"
-              } else {
-                "skip=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-                Write-Host "SHA256SUMS.txt no contiene entrada para $zipName; continuamos."
-              }
+            if ($zipAsset -and ($zipAsset.size -ge 10485760)) {
+              "skip=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+              "release_url=$($resp.html_url)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+              Write-Host "Release con ZIP válido ya existe: $($resp.html_url)"
             } else {
               "skip=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-              Write-Host "Falta ZIP o SHA256SUMS.txt en la release; continuamos."
+              Write-Host "Falta el ZIP o es demasiado pequeño; continuamos."
             }
           } catch {
             "skip=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
@@ -291,13 +284,10 @@ jobs:
         run: |
           $zipPath   = "${{ env.ZIP_PATH_WIN }}"
           $featPath  = "${{ env.FEATURES_PATH_WIN }}"
-          $shaPath   = "${{ env.SHA256_PATH_WIN }}"
           $outDir    = Split-Path $zipPath -Parent
           $notesPath = Join-Path $outDir "RELEASE_NOTES.txt"
 
-          $sha      = (Get-Content -Raw -Path $shaPath).Trim()
           $features = Get-Content -Raw -Path $featPath
-          $ver      = $env:MPV_VER
 
           function FindVal([string]$key, [string]$text) { if ($text -match "(?m)^\s*$key\s+([A-Za-z]+)\b") { $Matches[1] } else { "unknown" } }
 
@@ -325,12 +315,6 @@ jobs:
           }
 
           $lines = @(
-            "d4rk0.mpv $ver (Windows x64)"
-            ""
-            '```'
-            $sha
-            '```'
-            ""
             "### Highlights"
             "- Video outputs: d3d11: $($vals[""d3d11""]), gl: $($vals[""gl""]), vulkan: $($vals[""vulkan""])"
             "- Scripting: Lua: $($vals[""lua""]), JavaScript (MuJS): $($vals[""javascript""])"
@@ -353,11 +337,8 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           tag_name: mpv-${{ env.MPV_VER }}
-          name: "MPV ${{ env.MPV_VER }} (d4rk0 build, Windows x64)"
-          files: |
-            ${{ env.ZIP_PATH_WIN }}
-            ${{ env.SHA256_PATH_WIN }}
+          name: "MPV ${{ env.MPV_VER }}"
+          files: ${{ env.ZIP_PATH_WIN }}
           body_path: ${{ env.RELEASE_NOTES_PATH_WIN }}
           make_latest: true
           fail_on_unmatched_files: true
-
