@@ -3,7 +3,7 @@ name: Build MPV (d4rk0, Windows x64)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 6 * * *"   # diario 06:00 UTC
+    - cron: "0 6 * * *"
 
 permissions:
   contents: write
@@ -24,7 +24,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1) Resolver la ÚLTIMA release estable de MPV
       - name: Resolve latest stable MPV release
         id: mpvver
         shell: pwsh
@@ -33,16 +32,12 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
-
-          # Intento con gh y verifico exit code
           $tag = ""
           if (Get-Command gh -ErrorAction SilentlyContinue) {
             if (-not $env:GH_TOKEN) { $env:GH_TOKEN = $env:GITHUB_TOKEN }
             $tag = $(gh release view --repo mpv-player/mpv --json tagName --jq '.tagName' 2>$null)
             if ($LASTEXITCODE -ne 0) { $tag = "" }
           }
-
-          # Fallback por REST si hace falta
           if (-not $tag) {
             $headers = @{
               "User-Agent"            = "d4rk0-ci"
@@ -53,15 +48,12 @@ jobs:
             $resp = Invoke-RestMethod -Method GET -Uri "https://api.github.com/repos/mpv-player/mpv/releases/latest" -Headers $headers
             $tag = $resp.tag_name
           }
-
           if (-not $tag) { throw "No pude resolver el tag de MPV." }
           $ver = $tag.TrimStart('v')
-
           "MPV_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "MPV_VER=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "MPV tag: $tag / version: $ver"
 
-      # 2) Saltar si la release mpv-<versión> YA existe y tiene los 3 assets
       - name: Skip if release already exists (strict)
         id: skipcheck
         shell: pwsh
@@ -93,7 +85,6 @@ jobs:
           } catch {
             "skip=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
             Write-Host "Release no existe; continuamos."
-          }
 
       - name: Skip summary
         if: ${{ steps.skipcheck.outputs.skip == 'true' }}
@@ -101,7 +92,6 @@ jobs:
         run: |
           Write-Host "Saltado: ya existe la release ${{ steps.skipcheck.outputs.release_url }}"
 
-      # 3) MSYS2 (CLANG64) + toolchain + dependencias (con cache)
       - name: Setup MSYS2 (CLANG64) + packages
         if: ${{ steps.skipcheck.outputs.skip != 'true' }}
         uses: msys2/setup-msys2@v2
@@ -138,7 +128,6 @@ jobs:
             mingw-w64-clang-x86_64-libdvdread
             mingw-w64-clang-x86_64-libdvdnav
 
-      # 4) Descargar el código fuente del tag estable
       - name: Fetch mpv source
         if: ${{ steps.skipcheck.outputs.skip != 'true' }}
         shell: msys2 {0}
@@ -148,7 +137,6 @@ jobs:
           tar -xzf mpv.tar.gz
           mv "mpv-${MPV_VER}" mpv-src
 
-      # 5) Parche seguro por si FFmpeg>=8 (no falla si no aplica)
       - name: Patch FF_PROFILE -> AV_PROFILE (safe)
         if: ${{ steps.skipcheck.outputs.skip != 'true' }}
         shell: msys2 {0}
@@ -157,7 +145,6 @@ jobs:
           set -e
           sed -i 's/FF_PROFILE_/AV_PROFILE_/g' demux/demux_mkv.c || true
 
-      # 6) Configurar + Compilar con Meson/Ninja
       - name: Configure & Build (Meson/Ninja)
         if: ${{ steps.skipcheck.outputs.skip != 'true' }}
         shell: msys2 {0}
@@ -167,18 +154,27 @@ jobs:
           meson setup build --buildtype=release
           meson compile -C build -v
 
-      # 7) Smoke test básico (arranque y carga de OSC)
-      - name: Smoke test (mpv --version & osc)
+      - name: Smoke test (Lua+OSC)
         if: ${{ steps.skipcheck.outputs.skip != 'true' }}
         shell: msys2 {0}
         working-directory: mpv-src
         run: |
           set -euxo pipefail
-          ./build/mpv --version
-          ./build/mpv --no-config --idle=once --script=player/lua/osc.lua --log-file=./dist/smoke_osc.log
+          mkdir -p ./dist
+          cat > ./dist/quickquit.lua <<'EOF'
+          mp.add_timeout(0.1, function()
+            mp.msg.info("quickquit ok")
+            mp.command("quit 0")
+          end)
+          EOF
+          ./build/mpv --no-config --idle=once --no-terminal \
+            --script=player/lua/osc.lua \
+            --script=./dist/quickquit.lua \
+            --log-file=./dist/smoke_osc.log
           test -s ./dist/smoke_osc.log
+          log="$(cat ./dist/smoke_osc.log)"; log=${log//$'\r'/}
+          case "$log" in *"quickquit ok"*) : ;; *) echo "Marca no encontrada en smoke_osc.log"; exit 1 ;; esac
 
-      # 8) Guardar Feature summary
       - name: Dump feature summary
         if: ${{ steps.skipcheck.outputs.skip != 'true' }}
         shell: msys2 {0}
@@ -188,7 +184,6 @@ jobs:
           mkdir -p ./dist
           meson configure build > ./dist/FEATURES.txt
 
-      # 9) Empaquetar portable: mpv.exe + DLLs + scripts/OSC
       - name: Make portable ZIP
         if: ${{ steps.skipcheck.outputs.skip != 'true' }}
         shell: msys2 {0}
@@ -197,46 +192,44 @@ jobs:
           set -euo pipefail
           out="./dist"
           mkdir -p "$out"
-
-          # Ejecutables
           cp -v build/mpv.exe "$out/" || (echo "mpv.exe no encontrado" && exit 1)
           [ -f build/mpv.com ] && cp -v build/mpv.com "$out/"
-
           echo "Resolviendo DLLs con ntldd..."
           prefix_unix="/clang64/bin"
-
           mapfile -t DLLS < <(
-            ntldd -R build/mpv.exe \
-              | sed -n 's/.*=>[[:space:]]*\(.*\.dll\).*/\1/p' \
-              | tr -d '\r'
+            ntldd -R build/mpv.exe | while IFS= read -r line; do
+              case "$line" in
+                *"=>"*".dll"*"("*")"*)
+                  path="${line#*=> }"
+                  path="${path%% (*}"
+                  printf '%s\n' "$path"
+                ;;
+              esac
+            done
           ) || true
-
           for p in "${DLLS[@]}"; do
             p_u="$(cygpath -u "$p" 2>/dev/null || echo "$p")"
-            if [[ "$p_u" == $prefix_unix/*.dll ]]; then
-              echo "  + $p_u"
-              cp -nv "$p_u" "$out/" || true
-            fi
+            case "$p_u" in
+              /clang64/bin/*.dll)
+                echo "  + $p_u"
+                cp -nv "$p_u" "$out/" || true
+              ;;
+            esac
           done
-
-          # Scripts y configuración portable (OSC, stats, ytdl_hook, autoload)
           mkdir -p "$out/portable_config/scripts"
           cp -v "player/lua/osc.lua"         "$out/portable_config/scripts/osc.lua"
           cp -v "player/lua/stats.lua"       "$out/portable_config/scripts/stats.lua"
           cp -v "player/lua/ytdl_hook.lua"   "$out/portable_config/scripts/ytdl_hook.lua"
           cp -v "TOOLS/lua/autoload.lua"     "$out/portable_config/scripts/autoload.lua"
-
           cat > "$out/portable_config/mpv.conf" << 'EOF'
           osc=yes
           input-default-bindings=yes
           force-window=yes
           ytdl=yes
           EOF
-
           cd "$out"
           /usr/bin/zip -9 -r "d4rk0.mpv-${MPV_VER}-windows-x64.zip" .
 
-      # 10) Localizar salidas (rutas absolutas en Windows)
       - name: Locate outputs (ZIP & FEATURES)
         if: ${{ steps.skipcheck.outputs.skip != 'true' }}
         id: locate
@@ -253,7 +246,6 @@ jobs:
           Write-Host "ZIP: $($zip.FullName)"
           Write-Host "FEATURES: $($feat.FullName)"
 
-      # 11) Antivirus (Microsoft Defender) del ZIP
       - name: Defender scan ZIP
         if: ${{ steps.skipcheck.outputs.skip != 'true' }}
         shell: pwsh
@@ -269,7 +261,6 @@ jobs:
             Write-Host "MpCmdRun.exe no encontrado; omito escaneo."
           }
 
-      # 12) Checksums (SHA256SUMS.txt) fuera del ZIP
       - name: Generate SHA256SUMS.txt
         if: ${{ steps.skipcheck.outputs.skip != 'true' }}
         shell: pwsh
@@ -281,7 +272,6 @@ jobs:
           "SHA256_PATH_WIN=$sumPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "SHA256SUMS: $sumPath"
 
-      # 13) Subir artefactos (ZIP, FEATURES y SHA256SUMS)
       - name: Upload artifacts
         if: ${{ steps.skipcheck.outputs.skip != 'true' }}
         uses: actions/upload-artifact@v4
@@ -294,7 +284,6 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # 14) Componer notas de la release (sin here-string)
       - name: Compose release notes
         if: ${{ steps.skipcheck.outputs.skip != 'true' }}
         id: notes
@@ -305,11 +294,9 @@ jobs:
           $shaPath   = "${{ env.SHA256_PATH_WIN }}"
           $outDir    = Split-Path $zipPath -Parent
           $notesPath = Join-Path $outDir "RELEASE_NOTES.txt"
-
           $sha      = Get-Content -Raw -Path $shaPath
           $features = Get-Content -Raw -Path $featPath
           $ver      = $env:MPV_VER
-
           $lines = @(
             "d4rk0.mpv $ver (Windows x64)"
             ""
@@ -321,11 +308,9 @@ jobs:
             $features
           )
           $text = $lines -join "`r`n"
-
           $text | Out-File -FilePath $notesPath -Encoding utf8
           "RELEASE_NOTES_PATH_WIN=$notesPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      # 15) Publicar en GitHub Releases (ZIP + FEATURES + SHA256SUMS + notas)
       - name: Publish to GitHub Releases
         if: ${{ steps.skipcheck.outputs.skip != 'true' }}
         uses: softprops/action-gh-release@v2
