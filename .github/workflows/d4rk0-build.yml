@@ -3,8 +3,7 @@ name: Build MPV (d4rk0, Windows x64)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 6 * * *"
-      # diario 06:00 UTC
+    - cron: "0 6 * * *"   # diario 06:00 UTC
 
 permissions:
   contents: write
@@ -62,8 +61,8 @@ jobs:
           "MPV_VER=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "MPV tag: $tag / version: $ver"
 
-      # 2) Saltar si la release mpv-<versión> ya existe en ESTE repo
-      - name: Skip if release already exists
+      # 2) Saltar si la release mpv-<versión> YA existe y tiene los 3 assets
+      - name: Skip if release already exists (strict)
         id: skipcheck
         shell: pwsh
         env:
@@ -76,9 +75,21 @@ jobs:
           $headers = @{ "Authorization"="Bearer $env:GITHUB_TOKEN"; "Accept"="application/vnd.github+json" }
           try {
             $resp = Invoke-RestMethod -Method GET -Uri $url -Headers $headers -ErrorAction Stop
-            "skip=true"                         | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-            "release_url=$($resp.html_url)"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-            Write-Host "Release ya existe: $($resp.html_url)"
+            $need = @(
+              "d4rk0.mpv-$env:MPV_VER-windows-x64.zip",
+              "FEATURES.txt",
+              "SHA256SUMS.txt"
+            )
+            $assetNames = @($resp.assets | ForEach-Object { $_.name })
+            $missing = $need | Where-Object { $assetNames -notcontains $_ }
+            if ($missing.Count -eq 0) {
+              "skip=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+              "release_url=$($resp.html_url)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+              Write-Host "Release + assets ya existen: $($resp.html_url)"
+            } else {
+              Write-Host "Faltan assets en la release: $($missing -join ', ') — seguimos con el build."
+              "skip=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            }
           } catch {
             "skip=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
             Write-Host "Release no existe; continuamos."
@@ -89,7 +100,6 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "Saltado: ya existe la release ${{ steps.skipcheck.outputs.release_url }}"
-
 
       # 3) MSYS2 (CLANG64) + toolchain + dependencias (con cache)
       - name: Setup MSYS2 (CLANG64) + packages
@@ -128,7 +138,7 @@ jobs:
             mingw-w64-clang-x86_64-libdvdread
             mingw-w64-clang-x86_64-libdvdnav
 
-      # 4) Descargar el código fuente de MPV (tag estable)
+      # 4) Descargar el código fuente del tag estable
       - name: Fetch mpv source
         if: ${{ steps.skipcheck.outputs.skip != 'true' }}
         shell: msys2 {0}
@@ -157,7 +167,18 @@ jobs:
           meson setup build --buildtype=release
           meson compile -C build -v
 
-      # 7) Guardar Feature summary (crear dist antes)
+      # 7) Smoke test básico (arranque y carga de OSC)
+      - name: Smoke test (mpv --version & osc)
+        if: ${{ steps.skipcheck.outputs.skip != 'true' }}
+        shell: msys2 {0}
+        working-directory: mpv-src
+        run: |
+          set -euxo pipefail
+          ./build/mpv --version
+          ./build/mpv --no-config --idle=once --script=player/lua/osc.lua --log-file=./dist/smoke_osc.log
+          test -s ./dist/smoke_osc.log
+
+      # 8) Guardar Feature summary
       - name: Dump feature summary
         if: ${{ steps.skipcheck.outputs.skip != 'true' }}
         shell: msys2 {0}
@@ -166,9 +187,8 @@ jobs:
           set -euxo pipefail
           mkdir -p ./dist
           meson configure build > ./dist/FEATURES.txt
-        # usar 'meson configure build' (sin -C)
 
-      # 8) Empaquetar portable: mpv.exe + DLLs + scripts/OSC
+      # 9) Empaquetar portable: mpv.exe + DLLs + scripts/OSC
       - name: Make portable ZIP
         if: ${{ steps.skipcheck.outputs.skip != 'true' }}
         shell: msys2 {0}
@@ -216,7 +236,7 @@ jobs:
           cd "$out"
           /usr/bin/zip -9 -r "d4rk0.mpv-${MPV_VER}-windows-x64.zip" .
 
-      # 9) Localizar salidas (rutas absolutas en Windows)
+      # 10) Localizar salidas (rutas absolutas en Windows)
       - name: Locate outputs (ZIP & FEATURES)
         if: ${{ steps.skipcheck.outputs.skip != 'true' }}
         id: locate
@@ -233,7 +253,7 @@ jobs:
           Write-Host "ZIP: $($zip.FullName)"
           Write-Host "FEATURES: $($feat.FullName)"
 
-      # 10) Antivirus (Microsoft Defender) del ZIP
+      # 11) Antivirus (Microsoft Defender) del ZIP
       - name: Defender scan ZIP
         if: ${{ steps.skipcheck.outputs.skip != 'true' }}
         shell: pwsh
@@ -249,7 +269,7 @@ jobs:
             Write-Host "MpCmdRun.exe no encontrado; omito escaneo."
           }
 
-      # 11) Checksums (SHA256SUMS.txt) fuera del ZIP
+      # 12) Checksums (SHA256SUMS.txt) fuera del ZIP
       - name: Generate SHA256SUMS.txt
         if: ${{ steps.skipcheck.outputs.skip != 'true' }}
         shell: pwsh
@@ -261,7 +281,7 @@ jobs:
           "SHA256_PATH_WIN=$sumPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "SHA256SUMS: $sumPath"
 
-      # 12) Subir artefactos (ZIP, FEATURES y SHA256SUMS)
+      # 13) Subir artefactos (ZIP, FEATURES y SHA256SUMS)
       - name: Upload artifacts
         if: ${{ steps.skipcheck.outputs.skip != 'true' }}
         uses: actions/upload-artifact@v4
@@ -274,7 +294,38 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # 13) Publicar en GitHub Releases (ZIP + FEATURES + SHA256SUMS)
+      # 14) Componer notas de la release (sin here-string)
+      - name: Compose release notes
+        if: ${{ steps.skipcheck.outputs.skip != 'true' }}
+        id: notes
+        shell: pwsh
+        run: |
+          $zipPath   = "${{ env.ZIP_PATH_WIN }}"
+          $featPath  = "${{ env.FEATURES_PATH_WIN }}"
+          $shaPath   = "${{ env.SHA256_PATH_WIN }}"
+          $outDir    = Split-Path $zipPath -Parent
+          $notesPath = Join-Path $outDir "RELEASE_NOTES.txt"
+
+          $sha      = Get-Content -Raw -Path $shaPath
+          $features = Get-Content -Raw -Path $featPath
+          $ver      = $env:MPV_VER
+
+          $lines = @(
+            "d4rk0.mpv $ver (Windows x64)"
+            ""
+            "SHA256:"
+            $sha
+            ""
+            "Feature summary (Meson):"
+            "------------------------"
+            $features
+          )
+          $text = $lines -join "`r`n"
+
+          $text | Out-File -FilePath $notesPath -Encoding utf8
+          "RELEASE_NOTES_PATH_WIN=$notesPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # 15) Publicar en GitHub Releases (ZIP + FEATURES + SHA256SUMS + notas)
       - name: Publish to GitHub Releases
         if: ${{ steps.skipcheck.outputs.skip != 'true' }}
         uses: softprops/action-gh-release@v2
@@ -287,5 +338,6 @@ jobs:
             ${{ env.ZIP_PATH_WIN }}
             ${{ env.FEATURES_PATH_WIN }}
             ${{ env.SHA256_PATH_WIN }}
+          body_path: ${{ env.RELEASE_NOTES_PATH_WIN }}
           make_latest: true
           fail_on_unmatched_files: true
