@@ -2,174 +2,163 @@ name: Build MPV (d4rk0, Windows x64)
 
 on:
   workflow_dispatch:
-  # schedule:
-  #   - cron: "0 3 * * 1"   # opcional: lunes 03:00 UTC
-
-permissions:
-  contents: write
+  schedule:
+    - cron: "0 3 * * *"  # diario, 03:00 UTC: busca nueva release estable de mpv
 
 jobs:
   build:
     runs-on: windows-latest
+
     env:
-      MSYSTEM: CLANG64
-      CHERE_INVOKING: 1
-      PACKAGE_ID: d4rk0.mpv
+      PKG_PREFIX: clang64
+      BUILD_DIR: build
+      SRC_DIR: mpv-src
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1) Resolver la ÚLTIMA release estable de MPV (robusto)
+      # 1) Resolver última release estable de mpv (no prereleases)
       - name: Resolve latest stable MPV release
-        id: mpvver
+        id: mpv
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}       # necesario para gh
-          GITHUB_TOKEN: ${{ github.token }}   # para la API REST
         run: |
-          $ErrorActionPreference = "Stop"
+          $resp = Invoke-WebRequest -Uri "https://api.github.com/repos/mpv-player/mpv/releases/latest" `
+                  -Headers @{"Accept"="application/vnd.github+json"} `
+                  | Select-Object -Expand Content | ConvertFrom-Json
+          $tag = $resp.tag_name
+          if (-not $tag) { throw "No se pudo resolver la tag estable de mpv" }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "version=$($tag.TrimStart('v'))" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-          # 1) Intento con gh (y verificación del exit code)
-          $tag = ""
-          if (Get-Command gh -ErrorAction SilentlyContinue) {
-            if (-not $env:GH_TOKEN) { $env:GH_TOKEN = $env:GITHUB_TOKEN }
-            $tag = $(gh release view --repo mpv-player/mpv --json tagName --jq '.tagName' 2>$null)
-            if ($LASTEXITCODE -ne 0) { $tag = "" }
-          }
-
-          # 2) Fallback por REST si hace falta
-          if (-not $tag) {
-            $headers = @{
-              "User-Agent"            = "d4rk0-ci"
-              "Accept"                = "application/vnd.github+json"
-              "X-GitHub-Api-Version"  = "2022-11-28"
-              "Authorization"         = "Bearer $env:GITHUB_TOKEN"
-            }
-            $resp = Invoke-RestMethod -Method GET -Uri "https://api.github.com/repos/mpv-player/mpv/releases/latest" -Headers $headers
-            $tag = $resp.tag_name
-          }
-
-          if (-not $tag) { throw "No pude resolver el tag de MPV." }
-          $ver = $tag.TrimStart('v')
-
-          "MPV_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "MPV_VER=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "MPV tag: $tag / version: $ver"
-
-      # 2) MSYS2 (CLANG64) + toolchain + dependencias
+      # 2) Preparar MSYS2 (perfil CLANG64) + dependencias de mpv con extras
       - name: Setup MSYS2 (CLANG64) + packages
         uses: msys2/setup-msys2@v2
         with:
-          msystem: clang64
           update: true
+          msystem: CLANG64
+          # Paquetes verificados en MSYS2 clang64
           install: >-
+            base-devel
             git
-            zip
-            curl
-            jq
+            python
             mingw-w64-clang-x86_64-toolchain
-            mingw-w64-clang-x86_64-python
+            mingw-w64-clang-x86_64-pkgconf
             mingw-w64-clang-x86_64-meson
             mingw-w64-clang-x86_64-ninja
-            mingw-w64-clang-x86_64-pkgconf
             mingw-w64-clang-x86_64-ffmpeg
-            mingw-w64-clang-x86_64-libass
             mingw-w64-clang-x86_64-libplacebo
+            mingw-w64-clang-x86_64-libass
             mingw-w64-clang-x86_64-harfbuzz
             mingw-w64-clang-x86_64-uchardet
-            mingw-w64-clang-x86_64-vulkan-headers
-            mingw-w64-clang-x86_64-vulkan-loader
-            mingw-w64-clang-x86_64-spirv-cross
+            mingw-w64-clang-x86_64-luajit
+            mingw-w64-clang-x86_64-mujs
+            mingw-w64-clang-x86_64-zimg
+            mingw-w64-clang-x86_64-lcms2
+            mingw-w64-clang-x86_64-libarchive
+            mingw-w64-clang-x86_64-libbluray
+            mingw-w64-clang-x86_64-libdvdread
+            mingw-w64-clang-x86_64-libdvdnav
+            mingw-w64-clang-x86_64-vapoursynth
             mingw-w64-clang-x86_64-shaderc
-            mingw-w64-clang-x86_64-ntldd
+            mingw-w64-clang-x86_64-spirv-cross
+            mingw-w64-clang-x86_64-vulkan-loader
 
-      # 3) Descargar el código fuente de MPV (tarball del tag estable)
+      # 3) Obtener código fuente de mpv en la tag resuelta
       - name: Fetch mpv source
-        shell: msys2 {0}
+        shell: bash
         run: |
           set -euxo pipefail
-          curl -fsSL -o mpv.tar.gz "https://github.com/mpv-player/mpv/archive/refs/tags/${MPV_TAG}.tar.gz"
-          tar -xzf mpv.tar.gz
-          mv "mpv-${MPV_VER}" mpv-src
+          git clone --depth 1 --branch "${{ steps.mpv.outputs.tag }}" https://github.com/mpv-player/mpv.git "$SRC_DIR"
 
-      # 4) Parche seguro por si FFmpeg>=8 (no falla si no aplica)
+      # 4) Parche seguro FFmpeg 8+: FF_PROFILE -> AV_PROFILE (si aparece)
       - name: Patch FF_PROFILE -> AV_PROFILE (safe)
-        shell: msys2 {0}
-        working-directory: mpv-src
-        run: |
-          set -e
-          sed -i 's/FF_PROFILE_/AV_PROFILE_/g' demux/demux_mkv.c || true
-
-      # 5) Configurar + Compilar con Meson/Ninja
-      - name: Configure & Build (Meson/Ninja)
-        shell: msys2 {0}
-        working-directory: mpv-src
+        shell: bash
         run: |
           set -euxo pipefail
-          meson setup build --buildtype=release
-          meson compile -C build -v
+          shopt -s globstar
+          pushd "$SRC_DIR"
+          # Parche no destructivo: sólo si encuentra el token antiguo
+          grep -RIl 'FF_PROFILE' || true
+          files=$(grep -RIl 'FF_PROFILE' || true)
+          if [ -n "${files}" ]; then
+            sed -i 's/FF_PROFILE/AV_PROFILE/g' ${files}
+          fi
+          popd
 
-      # 6) Empaquetar portable: mpv.exe + DLLs (robusto, sin grep)
-      - name: Make portable ZIP
-        shell: msys2 {0}
-        working-directory: mpv-src
+      # 5) Configurar y compilar (Meson/Ninja). Autodetección de features.
+      - name: Configure & Build (Meson/Ninja)
+        shell: bash
         run: |
-          set -euo pipefail
-          out="../dist"
-          mkdir -p "$out"
+          set -euxo pipefail
+          meson setup "$BUILD_DIR" "$SRC_DIR" --buildtype=release
+          meson compile -C "$BUILD_DIR"
 
-          # Ejecutables
-          cp -v build/mpv.exe "$out/" || (echo "mpv.exe no encontrado" && exit 1)
-          [ -f build/mpv.com ] && cp -v build/mpv.com "$out/"
+      # 6) Empaquetar ZIP portable + scripts + config
+      - name: Make portable ZIP
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p mpv-src/dist
+          cp -v "$BUILD_DIR/mpv.exe" "mpv-src/dist/mpv.exe"
+          # copias opcionales (libmpv.dll por si te interesa distribuir SDK)
+          if [ -f "$BUILD_DIR/libmpv-2.dll" ]; then cp -v "$BUILD_DIR/libmpv-2.dll" "mpv-src/dist/"; fi
 
-          echo "Resolviendo DLLs con ntldd..."
-          prefix_unix="/clang64/bin"
+          # Estructura portable_config + scripts integrados
+          mkdir -p "mpv-src/dist/portable_config/scripts"
+          # Scripts integrados en el repo de mpv (OSC, stats, ytdl_hook)
+          cp -v "$SRC_DIR/player/lua/osc.lua"         "mpv-src/dist/portable_config/scripts/"
+          cp -v "$SRC_DIR/player/lua/stats.lua"       "mpv-src/dist/portable_config/scripts/"
+          cp -v "$SRC_DIR/player/lua/ytdl_hook.lua"   "mpv-src/dist/portable_config/scripts/"
 
-          # 1) Extraer posibles DLLs (tolerar lista vacía)
-          mapfile -t DLLS < <(
-            ntldd -R build/mpv.exe \
-              | sed -n 's/.*=>[[:space:]]*\(.*\.dll\).*/\1/p' \
-              | tr -d '\r'
-          ) || true
+          # mpv.conf con ajustes sensatos
+          cat > "mpv-src/dist/portable_config/mpv.conf" << 'MPVCONF'
+          osc=yes
+          force-window=yes
+          ytdl=yes
+          # Si usas yt-dlp en PATH, ytdl_hook lo encontrará. Puedes forzarlo así:
+          # script-opts=ytdl_hook-ytdl_path=yt-dlp
+          MPVCONF
 
-          # 2) Normalizar y copiar sólo las de /clang64/bin
-          for p in "${DLLS[@]}"; do
-            p_u="$(cygpath -u "$p" 2>/dev/null || echo "$p")"
-            if [[ "$p_u" == $prefix_unix/*.dll ]]; then
-              echo "  + $p_u"
-              cp -nv "$p_u" "$out/" || true
-            fi
-          done
+          # README rápido
+          cat > "mpv-src/dist/LEEME.txt" << 'TXT'
+          d4rk0 build: mpv portátil para Windows (x64).
+          - Doble clic en mpv.exe para abrir.
+          - La carpeta portable_config guarda tu configuración y scripts.
+          - OSC (barra de controles), stats y ytdl_hook están activados.
+          - Para reproducir URLs, instala "yt-dlp" (winget: winget install yt-dlp).
+          - DVDs sin protección y Blu-rays: soporte habilitado por libdvdread/nav y libbluray.
+          TXT
 
-          cd "$out"
-          /usr/bin/zip -9 -r "d4rk0.mpv-${MPV_VER}-windows-x64.zip" .
+          # Empaquetar
+          cd mpv-src/dist
+          zipname="d4rk0.mpv-${{ steps.mpv.outputs.version }}-windows-x64.zip"
+          7z a -tzip "../$zipname" * -mx=9
+          cd ..
+          echo "ZIP_PATH=$PWD/$zipname" >> $GITHUB_ENV
 
-      # 7) Localizar el ZIP con ruta absoluta de Windows (para las actions)
+      # 7) Convertir a ruta absoluta de Windows (para upload)
       - name: Locate ZIP (Windows absolute path)
-        id: locatezip
         shell: pwsh
         run: |
-          $name = "d4rk0.mpv-$env:MPV_VER-windows-x64.zip"
-          $zip = Get-ChildItem -Path "$env:GITHUB_WORKSPACE" -Recurse -File -Filter $name | Select-Object -First 1
-          if (-not $zip) { throw "ZIP not found: $name" }
-          "ZIP_PATH_WIN=$($zip.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "ZIP found at: $($zip.FullName)"
+          $p = Resolve-Path "$env:ZIP_PATH"
+          "ARTIFACT=$p" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+        id: paths
 
-      # 8) Subir artefacto (usa la ruta absoluta)
+      # 8) Subir artefacto
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: d4rk0.mpv-${{ env.MPV_VER }}-windows-x64
-          path: ${{ env.ZIP_PATH_WIN }}
-          if-no-files-found: error
+          name: d4rk0-mpv-${{ steps.mpv.outputs.version }}-windows-x64
+          path: ${{ steps.paths.outputs.ARTIFACT }}
 
-      # 9) Publicar en GitHub Releases (crea/actualiza release mpv-<versión>)
+      # 9) Publicar en GitHub Releases (tag mpv-X.Y.Z si no existe)
       - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: mpv-${{ env.MPV_VER }}
-          name: "MPV ${{ env.MPV_VER }} (d4rk0 build, Windows x64)"
-          files: ${{ env.ZIP_PATH_WIN }}
-          make_latest: true
-          fail_on_unmatched_files: true
+          tag_name: mpv-${{ steps.mpv.outputs.version }}
+          name: MPV ${{ steps.mpv.outputs.version }} (d4rk0 build, Windows x64)
+          files: ${{ steps.paths.outputs.ARTIFACT }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
