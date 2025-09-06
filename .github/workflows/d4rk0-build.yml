@@ -342,3 +342,12 @@ jobs:
           body_path: ${{ env.RELEASE_NOTES_PATH_WIN }}
           make_latest: true
           fail_on_unmatched_files: true
+
+      - name: Trigger WinGet manifests repo
+        if: ${{ steps.skipcheck.outputs.skip != 'true' }}
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.DISPATCH_TOKEN }}
+          repository: 0GMou/D4RKO-WINGET
+          event-type: mpv-release
+          client-payload: '{"version":"${{ env.MPV_VER }}"}'
