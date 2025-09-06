@@ -165,7 +165,8 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p ./dist
-          meson configure -C build > ./dist/FEATURES.txt
+          meson configure build > ./dist/FEATURES.txt
+        # usar 'meson configure build' (sin -C)
 
       # 8) Empaquetar portable: mpv.exe + DLLs + scripts/OSC
       - name: Make portable ZIP
